@@ -32,11 +32,11 @@ type Endpoint interface {
 	// Send text message to server.
 	Send(message []byte)
 
-	// Disconnect from server..
+	// Disconnect from server.
 	Disconnect()
 
-	// Regular reconnection..
-	Reconnect(evry time.Duration, message []byte)
+	// Regular reconnection.
+	Reconnect(evry time.Duration)
 
 	// Subscribe to error handling.
 	Error(handler func(err error))
@@ -53,8 +53,9 @@ type endpoint struct {
 	wer error  // Write error.
 	mtx sync.Mutex
 	trc *time.Ticker     // The ticker for reconnect.
+	lmc []byte           // last message from client.
 	omb [][]byte         // Outgoing message buffer.
-	srt chan struct{}    // Incoming message channel for stop reconnect ticker .
+	srt chan struct{}    // Incoming message channel for stop reconnect ticker.
 	imc chan []byte      // Incoming message channel.
 	imh func(msg []byte) // Incoming message handler.
 	ehl func(err error)  // Error handler handler.
@@ -62,6 +63,7 @@ type endpoint struct {
 	wgp sync.WaitGroup   // Main wait group.
 	cwe time.Time        // The time the connection was established.
 	lsa time.Time        // Time of last successful activity.
+	isp bool             // This connection is in the pool.
 	cia bool             // The connection is active.
 	rcn bool             // The connection is currently in a reconnecting state.
 	ige bool             // Ignore errors.
@@ -75,6 +77,7 @@ func New(url string) Endpoint {
 		wfm: []byte{0, 0},
 		wmk: []byte{0, 0, 0, 0},
 		omb: make([][]byte, 0),
+		isp: false,
 		cia: false,
 		rcn: false,
 		ige: false,
@@ -131,12 +134,15 @@ func (e *endpoint) Send(message []byte) {
 	} else {
 		e.send(0x1, message)
 	}
+	e.mtx.Lock()
+	e.lmc = message
+	e.mtx.Unlock()
 }
 
 // Regular reconnection.
-func (e *endpoint) Reconnect(evry time.Duration, message []byte) {
+func (e *endpoint) Reconnect(evry time.Duration) {
 
-	if !e.cia && e.trc != nil {
+	if !e.cia || e.trc != nil || e.isp {
 		return
 	}
 
@@ -150,15 +156,13 @@ func (e *endpoint) Reconnect(evry time.Duration, message []byte) {
 
 	done:
 		for {
-
 			select {
 			case <-e.trc.C:
-				e.reconnect(message)
+				e.reconnect()
 			case <-e.srt:
 				e.trc.Stop()
 				break done
 			}
-
 		}
 
 		e.tgp.Done()
@@ -219,7 +223,7 @@ func (e *endpoint) Error(handler func(err error)) {
 	e.mtx.Unlock()
 }
 
-func (e *endpoint) reconnect(message []byte) {
+func (e *endpoint) reconnect() {
 
 	if e.rcn || !e.cia || e.con == nil {
 		return
@@ -324,8 +328,8 @@ func (e *endpoint) reconnect(message []byte) {
 		swg.Done()
 	}()
 
-	if len(message) > 0 {
-		e.send(0x1, message)
+	if len(e.lmc) > 0 {
+		e.send(0x1, e.lmc)
 	}
 
 	e.send(0x9, png)

@@ -38,10 +38,10 @@ endpoint.Error(func(err error) {
 ### Schedule a seamless reconnection.
 
 #### When reconnect, data is not lost!
-in this example, a reconnect will be performed every 24 hours with sending the specified message to the server.
+in this example, a reconnect will be performed every 24 hours.
 ```go
 // Schedule a seamless regular reconnection.
-endpoint.Reconnect(time.Hour*24, []byte(`{"method": "SUBSCRIBE","params": ["btcusdt@aggTrade"],"id": 1}`))
+endpoint.Reconnect(time.Hour*24)
 ```
 
 
@@ -108,11 +108,27 @@ func main() {
     endpoint.Send([]byte(`{"method": "SUBSCRIBE","params": ["btcusdt@aggTrade"],"id": 1}`))
 
     // Schedule a seamless regular reconnection.
-    endpoint.Reconnect(time.Hour*24, []byte(`{"method": "SUBSCRIBE","params": ["btcusdt@aggTrade"],"id": 1}`))
+    endpoint.Reconnect(time.Hour*24)
 
     time.Sleep(time.Minute)
 
     // Disconnect from server.
     endpoint.Disconnect()
 }
+```
+
+## Pool - combines endpoints
+
+In this example, the Reconnect control is taken over by Poll.
+If multiple connections are created and they require regular reconnection, to avoid creating one-dimensional reconnections, Pool will be executed reconnections one after another.
+```go
+var pool wsc.Pool
+
+endpoint1 := wsc.New("htrhtr://www.fstream.binance.com/stream/")
+endpoint2 := wsc.New("htrhtr://www.fstream.binance.com/stream/")
+
+pool.Bind(endpoint1)
+pool.Bind(endpoint2)
+pool.Reconnect(time.Second)
+
 ```
