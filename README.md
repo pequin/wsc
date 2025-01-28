@@ -132,3 +132,8 @@ pool.Bind(endpoint2)
 pool.Reconnect(time.Second)
 
 ```
+
+Unbinds all endpoints.
+```go
+pool.Unbind()
+```
