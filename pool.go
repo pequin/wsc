@@ -23,8 +23,9 @@ type Pool endpoints
 type endpoints struct {
 	mtx sync.Mutex
 	cnd *sync.Cond
-	wgp sync.WaitGroup // Ticker wait group.
-	srt chan struct{}  // Incoming message channel for stop reconnect ticker.
+	lwg sync.WaitGroup // Listen wait group.
+	twg sync.WaitGroup // Ticker wait group.
+	stp chan struct{}  // Stop.
 	trc *time.Ticker   // The ticker for reconnect.
 	prs bool           // The pool is currently in a reconnecting state.
 	eds []*endpoint
@@ -34,6 +35,7 @@ func (p *Pool) Bind(new Endpoint) {
 
 	if p.cnd == nil {
 		p.cnd = sync.NewCond(&p.mtx)
+		p.stp = make(chan struct{})
 	}
 
 	p.mtx.Lock()
@@ -61,10 +63,49 @@ func (p *Pool) Bind(new Endpoint) {
 	p.eds = append(p.eds, e)
 }
 
+func (p *Pool) Listen(incoming func(message []byte)) {
+
+	msg := make(chan []byte) // Messages channel.
+
+	p.lwg.Add(1)
+
+	go func() {
+
+	done:
+		for {
+
+			select {
+			default:
+				incoming(<-msg)
+			case <-p.stp:
+				break done
+			}
+
+		}
+
+		p.lwg.Done()
+	}()
+
+	for i := 0; i < len(p.eds); i++ {
+
+		p.mtx.Lock()
+
+		if p.eds[i].imh == nil {
+			p.eds[i].Listen(func(message []byte) {
+				msg <- message
+			})
+		} else {
+			p.eds[i].imh = func(message []byte) {
+				msg <- message
+			}
+		}
+
+		p.mtx.Unlock()
+	}
+}
+
 // Regular reconnection.
 func (p *Pool) Reconnect(evry time.Duration) {
-
-	p.srt = make(chan struct{})
 
 	if p.trc == nil {
 		p.trc = time.NewTicker(evry)
@@ -72,7 +113,7 @@ func (p *Pool) Reconnect(evry time.Duration) {
 		p.trc.Reset(evry)
 	}
 
-	p.wgp.Add(1)
+	p.twg.Add(1)
 
 	go func() {
 
@@ -94,13 +135,13 @@ func (p *Pool) Reconnect(evry time.Duration) {
 				p.cnd.Broadcast()
 				p.mtx.Unlock()
 
-			case <-p.srt:
+			case <-p.stp:
 				p.trc.Stop()
 				break done
 			}
 		}
 
-		p.wgp.Done()
+		p.twg.Done()
 
 	}()
 }
@@ -108,17 +149,22 @@ func (p *Pool) Reconnect(evry time.Duration) {
 // Unbind all endpoints.
 func (p *Pool) Unbind() {
 
+	if p.cnd == nil {
+		p.stp <- struct{}{}
+	}
+
 	// Stopping reconnect goroutine.
 	if p.trc != nil {
-		p.srt <- struct{}{}
-		p.wgp.Wait()
-		close(p.srt)
+		p.twg.Wait()
 		p.trc = nil
 	}
+
+	p.lwg.Wait()
 
 	for i := 0; i < len(p.eds); i++ {
 		p.mtx.Lock()
 		p.eds[i].isp = false
 		p.mtx.Unlock()
 	}
+
 }

@@ -47,11 +47,10 @@ type endpoint struct {
 	ctx context.Context
 	cfc context.CancelFunc
 	con *tls.Conn
-	wfm []byte // Write frame.
-	wmk []byte // Write msk.
-	wpl int    // Write payload length.
-	wer error  // Write error.
-	mtx sync.Mutex
+	wfm []byte           // Write frame.
+	wmk []byte           // Write msk.
+	wpl int              // Write payload length.
+	wer error            // Write error.
 	trc *time.Ticker     // The ticker for reconnect.
 	lmc []byte           // last message from client.
 	omb [][]byte         // Outgoing message buffer.
@@ -88,9 +87,8 @@ func New(url string) Endpoint {
 
 // Connect to the endpoint and start listening incoming messages.
 func (e *endpoint) Listen(incoming func(message []byte)) {
-	e.mtx.Lock()
+
 	if e.con != nil {
-		e.mtx.Unlock()
 		return
 	}
 
@@ -108,7 +106,6 @@ func (e *endpoint) Listen(incoming func(message []byte)) {
 	e.cia = true
 	e.rcn = false
 	e.ige = false
-	e.mtx.Unlock()
 
 	e.wgp.Add(3)
 	e.listener()
@@ -128,15 +125,11 @@ func (e *endpoint) Listen(incoming func(message []byte)) {
 // Send text message to server.
 func (e *endpoint) Send(message []byte) {
 	if !e.cia || e.rcn || e.con == nil {
-		e.mtx.Lock()
 		e.omb = append(e.omb, message)
-		e.mtx.Unlock()
 	} else {
 		e.send(0x1, message)
 	}
-	e.mtx.Lock()
 	e.lmc = message
-	e.mtx.Unlock()
 }
 
 // Regular reconnection.
@@ -185,22 +178,17 @@ func (e *endpoint) Disconnect() {
 		e.trc = nil
 	}
 
-	e.mtx.Lock()
 	e.cfc()
 	e.cia = false
-	e.mtx.Unlock()
 
 	// Send message about closing connection.
 	e.send(0x8, nil)
 
-	e.mtx.Lock()
 	e.ige = true
 	e.con.Close()
-	e.mtx.Unlock()
 
 	e.wgp.Wait()
 
-	e.mtx.Lock()
 	e.ctx = nil
 	e.cfc = nil
 	e.con = nil
@@ -213,14 +201,11 @@ func (e *endpoint) Disconnect() {
 
 	close(e.imc)
 
-	e.mtx.Unlock()
 }
 
 // Subscribe to error handling.
 func (e *endpoint) Error(handler func(err error)) {
-	e.mtx.Lock()
 	e.ehl = handler
-	e.mtx.Unlock()
 }
 
 func (e *endpoint) reconnect() {
@@ -229,9 +214,7 @@ func (e *endpoint) reconnect() {
 		return
 	}
 
-	e.mtx.Lock()
 	e.rcn = true
-	e.mtx.Unlock()
 
 	// Ping message.
 	png := []byte("reconnect" + time.Now().UTC().String())
@@ -244,21 +227,17 @@ func (e *endpoint) reconnect() {
 		e.error(err)
 	}
 
-	e.mtx.Lock()
 	e.ige = true
 	e.con.SetDeadline(time.Now().UTC())
-	e.mtx.Unlock()
 	e.cfc()
 
 	e.wgp.Wait()
 	e.wgp.Add(3)
 	e.ctx, e.cfc = context.WithCancel(context.Background())
 
-	e.mtx.Lock()
 	con := e.con
 	e.con = c
 	e.ige = false
-	e.mtx.Unlock()
 
 	// Old connection wait group
 	var wgp sync.WaitGroup
@@ -317,10 +296,8 @@ func (e *endpoint) reconnect() {
 			if unq {
 				buf = append(buf, imc)
 			} else {
-				e.mtx.Lock()
 				e.con.SetDeadline(time.Now().UTC())
 				con.Close()
-				e.mtx.Unlock()
 			}
 		}
 
@@ -334,9 +311,7 @@ func (e *endpoint) reconnect() {
 
 	e.send(0x9, png)
 
-	e.mtx.Lock()
 	err = write(con, 0x9, png)
-	e.mtx.Unlock()
 	if err != nil {
 		e.error(err)
 	}
@@ -346,7 +321,6 @@ func (e *endpoint) reconnect() {
 
 	swg.Wait()
 
-	e.mtx.Lock()
 	e.con.SetDeadline(time.Time{})
 	e.rcn = false
 	e.cwe = time.Now().UTC()
@@ -354,7 +328,6 @@ func (e *endpoint) reconnect() {
 
 	omb := e.omb
 	e.omb = make([][]byte, 0)
-	e.mtx.Unlock()
 
 	e.listener()
 	e.pulse()
@@ -427,7 +400,6 @@ func (e *endpoint) pulse() {
 
 func (e *endpoint) send(opc byte, pld []byte) {
 
-	e.mtx.Lock()
 	e.wpl = len(pld)
 
 	e.wfm[0] = (1 << 7) | byte(opc)
@@ -457,7 +429,6 @@ func (e *endpoint) send(opc byte, pld []byte) {
 
 	_, e.wer = e.con.Write(e.wfm)
 	e.wfm = e.wfm[:2]
-	e.mtx.Unlock()
 
 	if e.wer != nil {
 		e.error(e.wer)
@@ -469,19 +440,19 @@ func (e *endpoint) listener() {
 	go func() {
 
 		err := read(e.con, func(fin bool, opc byte, msg []byte) {
+
 			if fin && (opc == 0x1 || opc == 0x2) {
 				e.imc <- msg
 			} else if fin && opc == 0x9 {
 				e.send(0xA, msg)
 			} else if fin && opc == 0x8 {
-				e.Disconnect()
-				ErrClosedConn = fmt.Errorf("server closed the connection: %s", string(msg))
+
+				ErrClosedConn = fmt.Errorf("disconnected from: %s %s", e.url, string(msg))
 				e.error(ErrClosedConn)
+				e.Disconnect()
 			}
 
-			e.mtx.Lock()
 			e.lsa = time.Now().UTC()
-			e.mtx.Unlock()
 
 		})
 
@@ -491,5 +462,4 @@ func (e *endpoint) listener() {
 		e.wgp.Done()
 
 	}()
-
 }

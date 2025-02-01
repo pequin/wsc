@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-    endpoint := wsc.New("htrhtr://www.fstream.binance.com/stream/")
+    endpoint := wsc.New("fstream.binance.com/stream/")
         
     // Connect to the endpoint and start listening incoming messages.
     endpoint.Listen(func(message []byte) {
@@ -97,7 +97,7 @@ import (
 )
 
 func main() {
-    endpoint := wsc.New("htrhtr://www.fstream.binance.com/stream/")
+    endpoint := wsc.New("fstream.binance.com/stream/")
         
     // Connect to the endpoint and start listening incoming messages.
     endpoint.Listen(func(message []byte) {
@@ -124,12 +124,28 @@ If multiple connections are created and they require regular reconnection, to av
 ```go
 var pool wsc.Pool
 
-endpoint1 := wsc.New("htrhtr://www.fstream.binance.com/stream/")
-endpoint2 := wsc.New("htrhtr://www.fstream.binance.com/stream/")
+endpoint1 := wsc.New("fstream.binance.com/stream/")
+endpoint2 := wsc.New("stream.binance.com/stream")
 
 pool.Bind(endpoint1)
 pool.Bind(endpoint2)
 pool.Reconnect(time.Second)
+
+```
+
+Listening of all connections.
+
+```go
+var pool wsc.Pool
+
+endpoint1 := wsc.New("fstream.binance.com/stream/")
+endpoint2 := wsc.New("stream.binance.com/stream")
+
+pool.Bind(endpoint1)
+pool.Bind(endpoint2)
+pool.Listen(func(message []byte) {
+	fmt.Println(string(message))
+})
 
 ```
 
