@@ -90,6 +90,10 @@ func (p *Pool) Listen(incoming func(message []byte)) {
 
 		p.mtx.Lock()
 
+		if i < len(p.eds)-1 {
+			time.Sleep(time.Minute)
+		}
+
 		if p.eds[i].imh == nil {
 			p.eds[i].Listen(func(message []byte) {
 				msg <- message
