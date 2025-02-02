@@ -25,6 +25,11 @@ import (
 	"time"
 )
 
+type Config struct {
+	// Set delay between sending messages.
+	SendLimit time.Duration
+}
+
 type Endpoint interface {
 	// Connect to the endpoint and start listening incoming messages.
 	Listen(incoming func(message []byte))
@@ -62,14 +67,15 @@ type endpoint struct {
 	wgp sync.WaitGroup   // Main wait group.
 	cwe time.Time        // The time the connection was established.
 	lsa time.Time        // Time of last successful activity.
+	lsd time.Time        // Time of last send.
 	isp bool             // This connection is in the pool.
 	cia bool             // The connection is active.
 	rcn bool             // The connection is currently in a reconnecting state.
 	ige bool             // Ignore errors.
-
+	cnf *Config
 }
 
-func New(url string) Endpoint {
+func New(url string, config *Config) Endpoint {
 
 	end := &endpoint{
 		url: url,
@@ -80,6 +86,7 @@ func New(url string) Endpoint {
 		cia: false,
 		rcn: false,
 		ige: false,
+		cnf: config,
 	}
 
 	return end
@@ -400,6 +407,12 @@ func (e *endpoint) pulse() {
 
 func (e *endpoint) send(opc byte, pld []byte) {
 
+	if e.cnf != nil {
+		if e.cnf.SendLimit > 0 {
+			time.Sleep(e.cnf.SendLimit - time.Now().UTC().Sub(e.lsd))
+		}
+	}
+
 	e.wpl = len(pld)
 
 	e.wfm[0] = (1 << 7) | byte(opc)
@@ -429,6 +442,7 @@ func (e *endpoint) send(opc byte, pld []byte) {
 
 	_, e.wer = e.con.Write(e.wfm)
 	e.wfm = e.wfm[:2]
+	e.lsd = time.Now().UTC()
 
 	if e.wer != nil {
 		e.error(e.wer)
@@ -449,7 +463,7 @@ func (e *endpoint) listener() {
 
 				ErrClosedConn = fmt.Errorf("disconnected from: %s %s", e.url, string(msg))
 				e.error(ErrClosedConn)
-				e.Disconnect()
+				// e.Disconnect()
 			}
 
 			e.lsa = time.Now().UTC()
