@@ -24,7 +24,7 @@ type WebSocket interface {
 	Connect()
 	Request(payload []byte) []byte
 	Reconnect()
-	Close()
+	Disconnect()
 }
 type websocket struct {
 	url string
@@ -130,10 +130,14 @@ func (ws *websocket) Reconnect() {
 	<-ws.flow.wait
 	ws.Connect()
 }
-func (ws *websocket) Close() {
+func (ws *websocket) Disconnect() {
 
 	ws.flow.mutex.Lock()
-	defer ws.flow.mutex.Unlock()
+
+	if ws.flow.isClosed {
+		log.Fatalf("This connection to the end point %s is already disconnected", ws.url)
+	}
+
 	ws.flow.isClosed = true
 	ws.flow.isWillBeClosed = true
 
@@ -148,4 +152,6 @@ func (ws *websocket) Close() {
 	ws.connection.response = nil
 	ws.connection.stream = nil
 	ws.flow.wait = nil
+
+	defer ws.flow.mutex.Unlock()
 }
