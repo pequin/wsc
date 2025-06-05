@@ -118,6 +118,10 @@ func (ws *websocket) Request(payload []byte) []byte {
 
 func (ws *websocket) Reconnect() {
 
+	ws.flow.mutex.Lock()
+	ws.flow.isWillBeClosed = true
+	ws.flow.mutex.Unlock()
+
 	ws.flow.cancel()
 	<-ws.wait
 	ws.Connect()
