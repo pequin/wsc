@@ -27,8 +27,7 @@ type WebSocket interface {
 	Close()
 }
 type websocket struct {
-	url  string
-	wait chan struct{}
+	url string
 
 	connection struct {
 		request  chan []byte
@@ -38,6 +37,7 @@ type websocket struct {
 
 	flow struct {
 		mutex          sync.Mutex
+		wait           chan struct{}
 		cancel         context.CancelFunc
 		isClosed       bool
 		isWillBeClosed bool
@@ -47,19 +47,15 @@ type websocket struct {
 func NewWebSocket(url string, stream func(payload []byte)) WebSocket {
 
 	ws := &websocket{
-		url:  url,
-		wait: make(chan struct{}),
+		url: url,
 		connection: struct {
 			request  chan []byte
 			response chan []byte
 			stream   chan []byte
-		}{
-			request:  make(chan []byte),
-			response: make(chan []byte),
-			stream:   make(chan []byte),
-		},
+		}{},
 		flow: struct {
 			mutex          sync.Mutex
+			wait           chan struct{}
 			cancel         context.CancelFunc
 			isClosed       bool
 			isWillBeClosed bool
@@ -83,6 +79,11 @@ func (ws *websocket) Connect() {
 
 	var ctx context.Context
 
+	ws.connection.request = make(chan []byte)
+	ws.connection.response = make(chan []byte)
+	ws.connection.stream = make(chan []byte)
+	ws.flow.wait = make(chan struct{})
+
 	ws.flow.mutex.Lock()
 
 	ctx, ws.flow.cancel = context.WithCancel(context.Background())
@@ -95,7 +96,7 @@ func (ws *websocket) Connect() {
 		}
 
 		defer func() {
-			ws.wait <- struct{}{}
+			ws.flow.wait <- struct{}{}
 		}()
 	}()
 
@@ -107,6 +108,9 @@ func (ws *websocket) Request(payload []byte) []byte {
 
 	ws.flow.mutex.Lock()
 	defer ws.flow.mutex.Unlock()
+	if ws.flow.isClosed {
+		log.Fatalf("The Connect() method was not called before the request, to the end point %s", ws.url)
+	}
 	if ws.flow.isWillBeClosed {
 		return nil
 	}
@@ -123,7 +127,7 @@ func (ws *websocket) Reconnect() {
 	ws.flow.mutex.Unlock()
 
 	ws.flow.cancel()
-	<-ws.wait
+	<-ws.flow.wait
 	ws.Connect()
 }
 func (ws *websocket) Close() {
@@ -134,10 +138,14 @@ func (ws *websocket) Close() {
 	ws.flow.isWillBeClosed = true
 
 	ws.flow.cancel()
-	<-ws.wait
+	<-ws.flow.wait
 	close(ws.connection.request)
 	close(ws.connection.response)
 	close(ws.connection.stream)
-	close(ws.wait)
+	close(ws.flow.wait)
 
+	ws.connection.request = nil
+	ws.connection.response = nil
+	ws.connection.stream = nil
+	ws.flow.wait = nil
 }
