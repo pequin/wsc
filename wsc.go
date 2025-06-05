@@ -408,5 +408,7 @@ func dial(ctx context.Context, URL string, request <-chan []byte, response chan<
 	close(writer.writted)
 	close(writer.wait)
 
+	conn = nil
+
 	return err
 }

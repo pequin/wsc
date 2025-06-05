@@ -21,14 +21,15 @@ import (
 // limitations under the License.
 
 type WebSocket interface {
+	Connect()
 	Request(payload []byte) []byte
 	Reconnect()
 	Close()
 }
 type websocket struct {
-	url        string
-	wait       chan struct{}
-	cancel     context.CancelFunc
+	url  string
+	wait chan struct{}
+
 	connection struct {
 		request  chan []byte
 		response chan []byte
@@ -36,8 +37,10 @@ type websocket struct {
 	}
 
 	flow struct {
-		mutex        sync.Mutex
-		willBeClosed bool
+		mutex          sync.Mutex
+		cancel         context.CancelFunc
+		isClosed       bool
+		isWillBeClosed bool
 	}
 }
 
@@ -56,14 +59,15 @@ func NewWebSocket(url string, stream func(payload []byte)) WebSocket {
 			stream:   make(chan []byte),
 		},
 		flow: struct {
-			mutex        sync.Mutex
-			willBeClosed bool
+			mutex          sync.Mutex
+			cancel         context.CancelFunc
+			isClosed       bool
+			isWillBeClosed bool
 		}{
-			willBeClosed: false,
+			isClosed:       true,
+			isWillBeClosed: false,
 		},
 	}
-
-	ws.dial()
 
 	go func() {
 		for s := range ws.connection.stream {
@@ -75,11 +79,35 @@ func NewWebSocket(url string, stream func(payload []byte)) WebSocket {
 	return ws
 }
 
+func (ws *websocket) Connect() {
+
+	var ctx context.Context
+
+	ws.flow.mutex.Lock()
+
+	ctx, ws.flow.cancel = context.WithCancel(context.Background())
+	ws.flow.isWillBeClosed = false
+
+	go func() {
+
+		if err := dial(ctx, ws.url, ws.connection.request, ws.connection.response, ws.connection.stream); err != nil {
+			log.Fatalln(err)
+		}
+
+		defer func() {
+			ws.wait <- struct{}{}
+		}()
+	}()
+
+	ws.flow.isClosed = false
+	defer ws.flow.mutex.Unlock()
+}
+
 func (ws *websocket) Request(payload []byte) []byte {
 
 	ws.flow.mutex.Lock()
 	defer ws.flow.mutex.Unlock()
-	if ws.flow.willBeClosed {
+	if ws.flow.isWillBeClosed {
 		return nil
 	}
 
@@ -90,37 +118,21 @@ func (ws *websocket) Request(payload []byte) []byte {
 
 func (ws *websocket) Reconnect() {
 
-	ws.cancel()
+	ws.flow.cancel()
 	<-ws.wait
-	ws.dial()
+	ws.Connect()
 }
 func (ws *websocket) Close() {
 
 	ws.flow.mutex.Lock()
 	defer ws.flow.mutex.Unlock()
-	ws.flow.willBeClosed = true
+	ws.flow.isWillBeClosed = true
 
-	ws.cancel()
+	ws.flow.cancel()
 	<-ws.wait
 	close(ws.connection.request)
 	close(ws.connection.response)
 	close(ws.connection.stream)
 	close(ws.wait)
 
-}
-
-func (ws *websocket) dial() {
-
-	go func() {
-		var ctx context.Context
-		ctx, ws.cancel = context.WithCancel(context.Background())
-
-		if err := dial(ctx, ws.url, ws.connection.request, ws.connection.response, ws.connection.stream); err != nil {
-			log.Fatalln(err)
-		}
-
-		defer func() {
-			ws.wait <- struct{}{}
-		}()
-	}()
 }
