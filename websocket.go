@@ -130,6 +130,7 @@ func (ws *websocket) Close() {
 
 	ws.flow.mutex.Lock()
 	defer ws.flow.mutex.Unlock()
+	ws.flow.isClosed = true
 	ws.flow.isWillBeClosed = true
 
 	ws.flow.cancel()
