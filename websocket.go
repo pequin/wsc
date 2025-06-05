@@ -22,6 +22,7 @@ import (
 
 type WebSocket interface {
 	Connect()
+	Listen(stream func(payload []byte))
 	Request(payload []byte) []byte
 	Reconnect()
 	Disconnect()
@@ -37,6 +38,7 @@ type websocket struct {
 
 	flow struct {
 		mutex          sync.Mutex
+		stream         func(payload []byte)
 		wait           chan struct{}
 		cancel         context.CancelFunc
 		isClosed       bool
@@ -44,7 +46,7 @@ type websocket struct {
 	}
 }
 
-func NewWebSocket(url string, stream func(payload []byte)) WebSocket {
+func NewWebSocket(url string) WebSocket {
 
 	ws := &websocket{
 		url: url,
@@ -55,6 +57,7 @@ func NewWebSocket(url string, stream func(payload []byte)) WebSocket {
 		}{},
 		flow: struct {
 			mutex          sync.Mutex
+			stream         func(payload []byte)
 			wait           chan struct{}
 			cancel         context.CancelFunc
 			isClosed       bool
@@ -64,13 +67,6 @@ func NewWebSocket(url string, stream func(payload []byte)) WebSocket {
 			isWillBeClosed: false,
 		},
 	}
-
-	go func() {
-		for s := range ws.connection.stream {
-
-			stream(s)
-		}
-	}()
 
 	return ws
 }
@@ -101,6 +97,29 @@ func (ws *websocket) Connect() {
 	}()
 
 	ws.flow.isClosed = false
+
+	go func() {
+		for s := range ws.connection.stream {
+
+			ws.flow.mutex.Lock()
+			if ws.flow.stream != nil {
+				ws.flow.stream(s)
+			}
+			ws.flow.mutex.Unlock()
+		}
+	}()
+
+	defer ws.flow.mutex.Unlock()
+}
+
+func (ws *websocket) Listen(stream func(payload []byte)) {
+
+	ws.flow.mutex.Lock()
+	if ws.flow.stream != nil {
+		log.Fatalf("This endpoint %s already has a stream listener running", ws.url)
+	}
+	ws.flow.stream = stream
+
 	defer ws.flow.mutex.Unlock()
 }
 
