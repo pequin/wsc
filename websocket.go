@@ -22,8 +22,8 @@ import (
 
 type WebSocket interface {
 	Connect()
-	Listen(stream func(payload []byte))
-	Request(payload []byte) []byte
+	Listen(func(message []byte))
+	Request([]byte) []byte
 	Reconnect()
 	Disconnect()
 }
