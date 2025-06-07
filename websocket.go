@@ -27,6 +27,7 @@ type WebSocket interface {
 	Reconnect()
 	Disconnect()
 }
+
 type websocket struct {
 	url string
 
@@ -149,6 +150,7 @@ func (ws *websocket) Reconnect() {
 	<-ws.flow.wait
 	ws.Connect()
 }
+
 func (ws *websocket) Disconnect() {
 
 	ws.flow.mutex.Lock()
