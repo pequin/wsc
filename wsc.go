@@ -16,7 +16,6 @@ package wsc
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
@@ -25,7 +24,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"log"
 	"net"
@@ -35,371 +33,279 @@ import (
 	"time"
 )
 
+// Frame opcodes from RFC 6455 §5.2.
+const (
+	opText  byte = 0x1
+	opClose byte = 0x8
+	opPing  byte = 0x9
+	opPong  byte = 0xA
+)
+
+// acceptGUID is appended to Sec-WebSocket-Key before hashing it into
+// Sec-WebSocket-Accept (RFC 6455 §1.3).
+const acceptGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+type frame struct {
+	fin     bool
+	opcode  byte
+	payload []byte
+}
+
 func dial(ctx context.Context, rawURL string, request <-chan []byte, response chan<- []byte, stream chan<- []byte) error {
-
-	var conn *tls.Conn
-	var host string
-	var path string
-	var port string
-
-	var err error
-
-	if url, err := url.Parse(rawURL); err == nil {
-
-		host, _ = strings.CutPrefix(url.Host, "www.")
-		path = url.RequestURI()
-		port = url.Port()
-
-		if port == "" {
-			port = "443"
-		}
-
-	} else {
+	u, err := url.Parse(rawURL)
+	if err != nil {
 		return err
+	}
+
+	host, _ := strings.CutPrefix(u.Host, "www.")
+	path := u.RequestURI()
+	port := u.Port()
+	if port == "" {
+		port = "443"
 	}
 
 	key := make([]byte, 16)
 	io.ReadFull(rand.Reader, key)
 	wsk := base64.StdEncoding.EncodeToString(key)
 
-	if conn, err = tls.Dial("tcp", fmt.Sprintf("%s:%s", host, port), &tls.Config{
-		InsecureSkipVerify: false,
-	}); err != nil {
+	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%s", host, port), nil)
+	if err != nil {
 		return err
 	}
-
 	if err = conn.Handshake(); err != nil {
 		return err
 	}
-
-	if err = conn.SetDeadline(time.Now().Add(time.Second * 10)); err != nil {
+	if err = conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return err
 	}
-
-	if _, err = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n", path, host, wsk); err != nil {
+	if err = handshake(conn, host, path, wsk); err != nil {
 		return err
 	}
-
-	// Read start-line.
-	buf := bufio.NewReader(conn)
-	if str, err := buf.ReadString('\n'); err != nil {
-		return err
-	} else if strings.Contains(str, "404 Not Found") {
-		return fmt.Errorf("%s: the path %s to is wrong", host, path)
-	} else if !strings.Contains(str, "101 Switching") {
-		return fmt.Errorf("%s: the server did not switch to the websocket protocol", host)
-	}
-
-	// Reading further lines.
-	var str string
-	var sts []string
-	var hsh hash.Hash
-	for {
-
-		if str, err = buf.ReadString('\r'); err != nil {
-			return err
-		}
-
-		str = strings.ReplaceAll(strings.ReplaceAll(str, "\n", ""), "\r", "")
-
-		// The last line has been read.
-		if len(str) == 0 {
-			break
-		}
-
-		sts = strings.SplitN(str, ": ", 2)
-
-		if len(sts) != 2 {
-			return fmt.Errorf("%s: the server did not switch to the websocket protocol", host)
-		}
-
-		if strings.ToLower(sts[0]) == "sec-websocket-accept" {
-
-			hsh = sha1.New()
-			hsh.Write([]byte(wsk))
-			hsh.Write([]byte("258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-			str = base64.StdEncoding.EncodeToString(hsh.Sum(nil))
-
-			if !bytes.Equal([]byte(sts[1]), []byte(str)) {
-				return fmt.Errorf("%s: invalid Sec-WebSocket-Accept", host)
-			}
-		}
-	}
-
 	if err = conn.SetDeadline(time.Time{}); err != nil {
 		return err
 	}
 
-	wait := make(chan error)
-	reader := struct {
-		readed chan []byte
-		wait   chan error
-	}{
-		readed: make(chan []byte),
-		wait:   make(chan error),
+	return serve(ctx, conn, request, response, stream)
+}
+
+// acceptKey returns the Sec-WebSocket-Accept value a server must send back
+// for the given Sec-WebSocket-Key.
+func acceptKey(key string) string {
+	sum := sha1.Sum([]byte(key + acceptGUID))
+	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// handshake sends the opening handshake for path on host over rw and checks
+// the server's reply. key is the base64-encoded Sec-WebSocket-Key.
+func handshake(rw io.ReadWriter, host, path, key string) error {
+	if _, err := fmt.Fprintf(rw, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n", path, host, key); err != nil {
+		return err
 	}
 
-	writer := struct {
-		write chan struct {
-			opc byte
-			pln []byte
+	br := bufio.NewReader(rw)
+	status, err := br.ReadString('\n')
+	switch {
+	case err != nil:
+		return err
+	case strings.Contains(status, "404 Not Found"):
+		return fmt.Errorf("%s: the path %s to is wrong", host, path)
+	case !strings.Contains(status, "101 Switching"):
+		return fmt.Errorf("%s: the server did not switch to the websocket protocol", host)
+	}
+
+	// Header lines are read up to '\r', so every line after the status line
+	// starts with the '\n' left over from the previous one.
+	for {
+		line, err := br.ReadString('\r')
+		if err != nil {
+			return err
 		}
-		writted chan struct{}
-		wait    chan error
-	}{
-		write: make(chan struct {
-			opc byte
-			pln []byte
-		}),
-		writted: make(chan struct{}),
-		wait:    make(chan error),
+
+		line = strings.ReplaceAll(strings.ReplaceAll(line, "\n", ""), "\r", "")
+		if line == "" {
+			return nil
+		}
+
+		name, value, ok := strings.Cut(line, ": ")
+		if !ok {
+			return fmt.Errorf("%s: the server did not switch to the websocket protocol", host)
+		}
+		if strings.ToLower(name) == "sec-websocket-accept" && value != acceptKey(key) {
+			return fmt.Errorf("%s: invalid Sec-WebSocket-Accept", host)
+		}
+	}
+}
+
+// readFrame reads one frame from r. The payload is read into buf when buf has
+// enough capacity, so it stays valid only until buf is reused.
+func readFrame(r io.Reader, buf []byte) (frame, error) {
+	var hdr [8]byte
+	if _, err := io.ReadFull(r, hdr[:2]); err != nil {
+		return frame{}, err
 	}
 
-	// Reader.
+	f := frame{
+		fin:    hdr[0]&0x80 != 0,
+		opcode: hdr[0] & 0x0F,
+	}
+
+	n := int(hdr[1] & 0x7F)
+	switch n {
+	case 126:
+		if _, err := io.ReadFull(r, hdr[:2]); err != nil {
+			return frame{}, err
+		}
+		n = int(binary.BigEndian.Uint16(hdr[:2]))
+	case 127:
+		if _, err := io.ReadFull(r, hdr[:8]); err != nil {
+			return frame{}, err
+		}
+		n = int(binary.BigEndian.Uint64(hdr[:8]))
+	}
+
+	if cap(buf) < n {
+		buf = make([]byte, 0, n)
+	}
+	f.payload = buf[:n]
+	if _, err := io.ReadFull(r, f.payload); err != nil {
+		return frame{}, err
+	}
+	return f, nil
+}
+
+// writeFrame writes payload to w as a single final frame. Only text, close
+// and pong frames are supported.
+func writeFrame(w io.Writer, opcode byte, payload []byte) error {
+	if opcode != opText && opcode != opClose && opcode != opPong {
+		return errors.New("frame type not supported by client")
+	}
+
+	// A client must mask every frame it sends (RFC 6455 §5.3), hence the
+	// 0x80 mask bit in the length byte.
+	n := len(payload)
+	b := make([]byte, 0, 14+n)
+	b = append(b, 0x80|opcode)
+	switch {
+	case n <= 125:
+		b = append(b, 0x80|byte(n))
+	case n <= 65535:
+		b = append(b, 0x80|126)
+		b = binary.BigEndian.AppendUint16(b, uint16(n))
+	default:
+		b = append(b, 0x80|127)
+		b = binary.BigEndian.AppendUint64(b, uint64(n))
+	}
+
+	var mask [4]byte
+	if _, err := rand.Read(mask[:]); err != nil {
+		return err
+	}
+	b = append(b, mask[:]...)
+	for i, c := range payload {
+		b = append(b, c^mask[i%4])
+	}
+
+	_, err := w.Write(b)
+	return err
+}
+
+// serve runs an established connection until ctx is canceled. Text messages
+// from the server go to stream, except the first one after each request,
+// which goes to response.
+func serve(ctx context.Context, conn net.Conn, request <-chan []byte, response chan<- []byte, stream chan<- []byte) error {
+	messages := make(chan []byte)
+	readerDone := make(chan error)
+	frames := make(chan frame)
+	written := make(chan struct{})
+	writerDone := make(chan error)
+
 	go func() {
-		var fin bool
-		var opc byte
-		var pln int
 		var err error
-
-		by2 := make([]byte, 2)
-		by8 := make([]byte, 8)
-		pld := make([]byte, 0, 256)
-	done:
+		var f frame
+		buf := make([]byte, 0, 256)
+	loop:
 		for {
-			if _, err = io.ReadFull(conn, by2); err != nil {
-				break done
+			if f, err = readFrame(conn, buf); err != nil {
+				break
 			}
+			buf = f.payload
 
-			fin = by2[0]&0x80 != 0
-			opc = by2[0] & 0x0F
-			pln = int(by2[1] & 0x7F)
-
-			if pln == 126 {
-				_, err = io.ReadFull(conn, by2)
-				if err != nil {
-					break done
-				}
-				pln = int(binary.BigEndian.Uint16(by2))
-
-			} else if pln == 127 {
-				_, err = io.ReadFull(conn, by8)
-				if err != nil {
-					break done
-				}
-				pln = int(binary.BigEndian.Uint64(by8))
-			}
-
-			if cap(pld) < pln {
-				pld = make([]byte, 0, pln)
-			}
-
-			if _, err = io.ReadFull(conn, pld[:pln]); err != nil {
-				break done
-			}
-
-			switch opc {
-			case 0x1: // Text
-
-				reader.readed <- pld[:pln]
-
-			case 0x8: // Close
+			switch f.opcode {
+			case opText:
+				messages <- f.payload
+			case opClose:
 				err = errors.New("the server closed the connection")
-				break done
-			case 0x9: // ping
-
-				writer.write <- struct {
-					opc byte
-					pln []byte
-				}{
-					opc: 0xA,
-					pln: pld[:pln],
-				}
-				<-writer.writted
-
+				break loop
+			case opPing:
+				frames <- frame{opcode: opPong, payload: f.payload}
+				<-written
 			default:
 				err = errors.New("frame type not supported by client")
-				break done
+				break loop
 			}
 
-			if !fin {
+			if !f.fin {
 				err = errors.New("the final frame was not received")
-				break done
+				break
 			}
-
 		}
-
-		defer func() {
-			reader.wait <- err
-		}()
-
+		readerDone <- err
 	}()
 
-	// Writer.
 	go func() {
-
 		var err error
-		fme := make([]byte, 2)
-		msk := make([]byte, 4)
-	done:
-		for w := range writer.write {
-
-			if w.opc != 0x1 && w.opc != 0x8 && w.opc != 0xA {
-				err = errors.New("frame type not supported by client")
-				break done
+		for f := range frames {
+			if err = writeFrame(conn, f.opcode, f.payload); err != nil {
+				break
 			}
-
-			fme[0] = (1 << 7) | w.opc
-			if l := len(w.pln); l <= 125 {
-				fme[1] = byte(0x80) | byte(len(w.pln))
-			} else if l <= 65535 {
-				fme[1] = byte(0x80) | byte(126)
-				fme = append(fme, byte(l>>8), byte(l))
-			} else {
-				fme[1] = byte(0x80) | byte(127) // Mask = 1, len = 127.
-				fme = append(fme,
-					byte(l>>56), byte(l>>48),
-					byte(l>>40), byte(l>>32),
-					byte(l>>24), byte(l>>16),
-					byte(l>>8), byte(l))
+			if f.opcode == opClose {
+				break
 			}
-
-			if _, err = rand.Read(msk); err != nil {
-				break done
-			}
-
-			fme = append(fme, msk...)
-
-			for i, b := range w.pln {
-				fme = append(fme, b^msk[i%4])
-			}
-
-			if _, err = conn.Write(fme); err != nil {
-				break done
-			}
-
-			// Closing code.
-			if w.opc == 0x8 {
-				break done
-			}
-
-			fme = fme[:2]
-
-			writer.writted <- struct{}{}
-
+			written <- struct{}{}
 		}
-
-		defer func() {
-			writer.wait <- err
-		}()
-
+		writerDone <- err
 	}()
 
-	// Input - output.
-	var iow sync.WaitGroup
-	iow.Add(1)
-	go func() {
-		var pln []byte
-	done:
+	var exchange sync.WaitGroup
+	exchange.Go(func() {
 		for {
 			select {
-			case pln = <-reader.readed:
-
-				stream <- pln
-
-			case pln = <-request:
-
-				writer.write <- struct {
-					opc byte
-					pln []byte
-				}{
-					opc: 0x1,
-					pln: pln,
-				}
-
-				<-writer.writted
-
-				response <- <-reader.readed
-
+			case msg := <-messages:
+				stream <- msg
+			case msg := <-request:
+				frames <- frame{opcode: opText, payload: msg}
+				<-written
+				response <- <-messages
 			case <-ctx.Done():
-				break done
+				return
 			}
 		}
+	})
 
-		iow.Done()
-
-	}()
-
-	// Pulse.
-	go func() {
-
-		var err error
-	done:
-		for {
-
-			select {
-
-			case <-ctx.Done():
-
-				// Waiting for input - output.
-				iow.Wait()
-
-				writer.write <- struct {
-					opc byte
-					pln []byte
-				}{
-					opc: 0x8,
-					pln: nil,
-				}
-
-				// Waiting for the writer to done.
-				if err := <-writer.wait; err != nil {
-					log.Fatalln(err)
-				}
-
-				if err := conn.SetDeadline(time.Now()); err != nil {
-					log.Fatalln(err)
-				}
-
-				// Waiting for the reader to done.
-				err = <-reader.wait
-				if err, ok := err.(net.Error); !ok || !err.Timeout() {
-					log.Fatalln(err)
-				}
-
-				err = nil
-
-				break done
-
-			case err = <-writer.wait:
-				log.Fatalln(err)
-			case err = <-reader.wait:
-				log.Fatalln(err)
-			}
-		}
-
-		defer func() {
-			wait <- err
-		}()
-	}()
-
-	err = <-wait
-	if err != nil {
-		return err
+	select {
+	case <-ctx.Done():
+	case err := <-writerDone:
+		log.Fatalln(err)
+	case err := <-readerDone:
+		log.Fatalln(err)
 	}
 
-	if err = conn.Close(); err != nil {
-		return err
+	// Let an in-flight request finish before sending Close.
+	exchange.Wait()
+	frames <- frame{opcode: opClose}
+	if err := <-writerDone; err != nil {
+		log.Fatalln(err)
 	}
 
-	close(wait)
-	close(reader.readed)
-	close(reader.wait)
-	close(writer.write)
-	close(writer.writted)
-	close(writer.wait)
+	// The expired deadline unblocks the reader, so it is expected to stop
+	// with a timeout.
+	if err := conn.SetDeadline(time.Now()); err != nil {
+		log.Fatalln(err)
+	}
+	err := <-readerDone
+	if err, ok := err.(net.Error); !ok || !err.Timeout() {
+		log.Fatalln(err)
+	}
 
-	conn = nil
-
-	return err
+	return conn.Close()
 }
