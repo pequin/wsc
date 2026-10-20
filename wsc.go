@@ -1,3 +1,17 @@
+// Copyright 2025 Vasiliy Vdovin
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package wsc
 
 import (
@@ -21,21 +35,7 @@ import (
 	"time"
 )
 
-// Copyright 2025 Vasiliy Vdovin
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-
-// http://www.apache.org/licenses/LICENSE-2.0
-
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-func dial(ctx context.Context, URL string, request <-chan []byte, response chan<- []byte, stream chan<- []byte) error {
+func dial(ctx context.Context, rawURL string, request <-chan []byte, response chan<- []byte, stream chan<- []byte) error {
 
 	var conn *tls.Conn
 	var host string
@@ -44,7 +44,7 @@ func dial(ctx context.Context, URL string, request <-chan []byte, response chan<
 
 	var err error
 
-	if url, err := url.Parse(URL); err == nil {
+	if url, err := url.Parse(rawURL); err == nil {
 
 		host, _ = strings.CutPrefix(url.Host, "www.")
 		path = url.RequestURI()
@@ -61,7 +61,6 @@ func dial(ctx context.Context, URL string, request <-chan []byte, response chan<
 	key := make([]byte, 16)
 	io.ReadFull(rand.Reader, key)
 	wsk := base64.StdEncoding.EncodeToString(key)
-	key = nil
 
 	if conn, err = tls.Dial("tcp", fmt.Sprintf("%s:%s", host, port), &tls.Config{
 		InsecureSkipVerify: false,
@@ -77,7 +76,7 @@ func dial(ctx context.Context, URL string, request <-chan []byte, response chan<
 		return err
 	}
 
-	if _, err = conn.Write([]byte(fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n", path, host, wsk))); err != nil {
+	if _, err = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n\r\n", path, host, wsk); err != nil {
 		return err
 	}
 
@@ -130,14 +129,6 @@ func dial(ctx context.Context, URL string, request <-chan []byte, response chan<
 	if err = conn.SetDeadline(time.Time{}); err != nil {
 		return err
 	}
-
-	host = ""
-	path = ""
-	port = ""
-	wsk = ""
-	str = ""
-	sts = nil
-	hsh = nil
 
 	wait := make(chan error)
 	reader := struct {
@@ -258,7 +249,7 @@ func dial(ctx context.Context, URL string, request <-chan []byte, response chan<
 				break done
 			}
 
-			fme[0] = (1 << 7) | byte(w.opc)
+			fme[0] = (1 << 7) | w.opc
 			if l := len(w.pln); l <= 125 {
 				fme[1] = byte(0x80) | byte(len(w.pln))
 			} else if l <= 65535 {
