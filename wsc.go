@@ -64,9 +64,10 @@ func dial(ctx context.Context, rawURL string, request <-chan []byte, response ch
 		port = "443"
 	}
 
-	key := make([]byte, 16)
-	io.ReadFull(rand.Reader, key)
-	wsk := base64.StdEncoding.EncodeToString(key)
+	key, err := newKey(rand.Reader)
+	if err != nil {
+		return err
+	}
 
 	conn, err := tls.Dial("tcp", fmt.Sprintf("%s:%s", host, port), nil)
 	if err != nil {
@@ -78,7 +79,7 @@ func dial(ctx context.Context, rawURL string, request <-chan []byte, response ch
 	if err = conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		return err
 	}
-	if err = handshake(conn, host, path, wsk); err != nil {
+	if err = handshake(conn, host, path, key); err != nil {
 		return err
 	}
 	if err = conn.SetDeadline(time.Time{}); err != nil {
@@ -93,6 +94,16 @@ func dial(ctx context.Context, rawURL string, request <-chan []byte, response ch
 func acceptKey(key string) string {
 	sum := sha1.Sum([]byte(key + acceptGUID))
 	return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// newKey returns a base64-encoded Sec-WebSocket-Key built from 16 bytes read
+// from random (RFC 6455 §4.1).
+func newKey(random io.Reader) (string, error) {
+	var b [16]byte
+	if _, err := io.ReadFull(random, b[:]); err != nil {
+		return "", fmt.Errorf("generate Sec-WebSocket-Key: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b[:]), nil
 }
 
 // handshake sends the opening handshake for path on host over rw and checks

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -33,6 +34,43 @@ func TestAcceptKey(t *testing.T) {
 	const key, want = "dGhlIHNhbXBsZSBub25jZQ==", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
 	if got := acceptKey(key); got != want {
 		t.Errorf("acceptKey(%q) = %q, want %q", key, got, want)
+	}
+}
+
+func TestNewKey(t *testing.T) {
+	random := bytes.NewReader([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17})
+	const want = "AQIDBAUGBwgJCgsMDQ4PEA=="
+	got, err := newKey(random)
+	if err != nil {
+		t.Fatalf("newKey() error = %v", err)
+	}
+	if got != want {
+		t.Errorf("newKey() = %q, want %q", got, want)
+	}
+}
+
+func TestNewKeyReadError(t *testing.T) {
+	errRandom := errors.New("entropy source failed")
+
+	tests := []struct {
+		name   string
+		random io.Reader
+		want   error
+	}{
+		{name: "read error", random: iotest.ErrReader(errRandom), want: errRandom},
+		{name: "short read", random: bytes.NewReader(make([]byte, 15)), want: io.ErrUnexpectedEOF},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := newKey(tt.random)
+			if !errors.Is(err, tt.want) {
+				t.Errorf("newKey() error = %v, want %v", err, tt.want)
+			}
+			if key != "" {
+				t.Errorf("newKey() = %q, want an empty key on error", key)
+			}
+		})
 	}
 }
 
